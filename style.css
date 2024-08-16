@@ -1,0 +1,87 @@
+*{
+    margin: 0%;
+    padding: 0%;
+    box-sizing: border-box;
+}
+
+body{
+    background:radial-gradient(white,rgb(0, 0, 104));
+    min-height: 900px;
+    max-height: 900px;
+
+}
+
+h1{
+    font-size: 70px;
+    font-family: "Nabla", system-ui;
+    font-optical-sizing: auto;
+    font-weight: 600;
+    font-style: normal;
+    font-variation-settings:
+      "EDPT" 100,
+      "EHLT" 12;
+}
+
+button{
+    width: 300px;
+    height: 80px;
+    box-shadow: 2px 2px 2px black;
+    transition: all 0.4s;
+}
+
+button:hover{
+    transform: scale(101%);
+}
+
+
+.diceContainer{
+    width: 200px;
+    height: 200px;
+    perspective: 1000px;
+    margin: 30%;
+}
+
+.dice{
+    width: 100%;
+    height: 100%;
+    padding: 10px;
+    position: absolute;
+    transform-style: preserve-3d;
+    transform: rotateX(0deg) rotateY(0deg);
+    transition: all 5s ease-in-out;
+    box-shadow: 2px 2px 2px black;
+}
+
+
+.face {
+    position: absolute;
+    width: 200px;
+    height: 200px;
+    background: radial-gradient(white,rgb(228, 228, 228),rgb(1, 73, 95));
+    border: 15px solid #11264d;
+    border-radius: 10px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 80px;
+    font-weight: 600;
+}
+
+.face1 { transform: rotateY(0deg) translateZ(50px); }
+.face2 { transform: rotateY(90deg) translateZ(50px); }
+.face3 { transform: rotatex(180deg) translateZ(50px); }
+.face4 { transform: rotateY(270deg) translateZ(50px); }
+.face5 { transform: rotateX(90deg) translateZ(50px); }
+.face6 { transform: rotateX(-90deg) translateZ(50px); }
+
+.roll {
+    animation: rolling 1.6s forwards;
+}
+
+@keyframes rolling {
+    0% { transform: rotateX(0deg) rotateY(0deg); }
+    25% { transform: rotateX(270deg) rotateY(90deg); }
+    50% { transform: rotateX(180deg) rotateY(180deg); }
+    75% { transform: rotateX(90deg) rotateY(270deg); }
+    100% { transform: rotateX(0deg) rotateY(360deg); }
+}
