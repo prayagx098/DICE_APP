@@ -1,3 +1,4 @@
+/* Global Reset */
 * {
     margin: 0;
     padding: 0;
@@ -5,40 +6,40 @@
 }
 
 body {
-    background: radial-gradient(circle, #ffffff, #003366);
-    font-family: 'Nabla', sans-serif;
+    background-color: #000000;
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    font-family: sans-serif;
 }
 
-.header {
-    background-color: rgba(0, 0, 0, 0.7);
-    padding: 20px;
-    border-bottom: 3px solid #FFD700;
+/* Full Viewport Swipe Area */
+.viewport {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: grab;
+    touch-action: none;
 }
 
-h1 {
-    font-size: 3rem;
-    font-weight: 700;
+.viewport:active {
+    cursor: grabbing;
 }
 
-button {
-    width: 200px;
-    height: 60px;
-    border: none;
-    border-radius: 8px;
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-    transition: transform 0.3s, box-shadow 0.3s;
-}
-
-button:hover {
-    transform: scale(1.05);
-    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.4);
-}
-
+/* Realistic 3D Projections */
 .diceContainer {
-    width: 200px;
-    height: 200px;
+    width: 160px;
+    height: 160px;
     perspective: 1000px;
-    margin: 0 auto;
 }
 
 .dice {
@@ -46,38 +47,100 @@ button:hover {
     height: 100%;
     position: relative;
     transform-style: preserve-3d;
-    transition: transform 0.8s;
 }
 
+/* Ivory Material Face Style */
 .face {
     position: absolute;
     width: 100%;
     height: 100%;
-    background: radial-gradient(circle, #ffffff, #d0d0d0);
-    border: 5px solid #003366;
-    border-radius: 8px;
+    background: radial-gradient(circle at 35% 35%, #ffffff 0%, #f7f5f0 55%, #e3ded5 100%);
+    border: 2px solid rgba(0, 0, 0, 0.18);
+    border-radius: 26px;
+    box-shadow: 
+        inset 0 0 16px rgba(0, 0, 0, 0.08), 
+        inset -3px -3px 8px rgba(0, 0, 0, 0.15),
+        0 12px 28px rgba(0, 0, 0, 0.5);
     display: flex;
     justify-content: center;
     align-items: center;
-    font-size: 2.5rem;
-    font-weight: 700;
+    padding: 18px;
 }
 
-.face1 { transform: rotateY(0deg) translateZ(100px); }
-.face2 { transform: rotateY(90deg) translateZ(100px); }
-.face3 { transform: rotateY(180deg) translateZ(100px); }
-.face4 { transform: rotateY(270deg) translateZ(100px); }
-.face5 { transform: rotateX(90deg) translateZ(100px); }
-.face6 { transform: rotateX(-90deg) translateZ(100px); }
+/* Geometrically Correct Opposite Face Positions (translateZ is 80px) */
+.face1 { transform: rotateY(0deg) translateZ(80px); }
+.face2 { transform: rotateY(90deg) translateZ(80px); }
+.face3 { transform: rotateX(90deg) translateZ(80px); }
+.face4 { transform: rotateX(-90deg) translateZ(80px); }
+.face5 { transform: rotateY(-90deg) translateZ(80px); }
+.face6 { transform: rotateY(180deg) translateZ(80px); }
 
-.roll {
-    animation: rolling 1.5s forwards;
+/* Pips Grid */
+.pip-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    width: 100%;
+    height: 100%;
+    gap: 8px;
 }
 
-@keyframes rolling {
-    0% { transform: rotateX(0deg) rotateY(0deg); }
-    25% { transform: rotateX(270deg) rotateY(90deg); }
-    50% { transform: rotateX(180deg) rotateY(180deg); }
-    75% { transform: rotateX(90deg) rotateY(270deg); }
-    100% { transform: rotateX(0deg) rotateY(360deg); }
+/* Indented Charcoal Pips */
+.pip {
+    display: block;
+    background: #18181b;
+    border-radius: 50%;
+    width: 17px;
+    height: 17px;
+    align-self: center;
+    justify-self: center;
+    box-shadow: 
+        inset 0 2px 2.5px rgba(0, 0, 0, 0.75), 
+        0 1px 1px rgba(255, 255, 255, 0.95);
+}
+
+/* Large Center Crimson Red pip for Face 1 */
+.face1 .pip {
+    background: #dc2626;
+    width: 30px;
+    height: 30px;
+    box-shadow: 
+        inset 0 2.5px 3.5px rgba(0, 0, 0, 0.65), 
+        0 1px 1px rgba(255, 255, 255, 0.95);
+}
+
+/* Pip position classes */
+.pip-grid .p1 { grid-area: 2 / 2; }
+.pip-grid .p2 { grid-area: 1 / 1; }
+.pip-grid .p3 { grid-area: 3 / 3; }
+.pip-grid .p4 { grid-area: 1 / 3; }
+.pip-grid .p5 { grid-area: 3 / 1; }
+.pip-grid .p6 { grid-area: 2 / 1; }
+.pip-grid .p7 { grid-area: 2 / 3; }
+
+/* Dynamic Shake animations */
+.diceContainer.shaking {
+    animation: shaking-move 0.4s ease infinite;
+}
+
+@keyframes shaking-move {
+    0% { transform: translate(1.5px, 1.5px) rotate(0deg); }
+    20% { transform: translate(-2px, -1.5px) rotate(-1deg); }
+    40% { transform: translate(-2px, 2px) rotate(0deg); }
+    60% { transform: translate(2px, -2px) rotate(1deg); }
+    80% { transform: translate(-1.5px, 1.5px) rotate(-1deg); }
+    100% { transform: translate(1.5px, -2px) rotate(0deg); }
+}
+
+/* Ambient shadow overlay during throws */
+.viewport::after {
+    content: '';
+    position: absolute;
+    width: 160px;
+    height: 10px;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.6) 0%, transparent 80%);
+    bottom: calc(50% - 100px);
+    z-index: -1;
+    filter: blur(4px);
+    pointer-events: none;
 }
