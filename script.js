@@ -66,6 +66,14 @@ function quatToMatrix3d(q) {
     return `matrix3d(${m00},${m10},${m20},0,${m01},${m11},${m21},0,${m02},${m12},${m22},0,0,0,0,1)`;
 }
 
+function quatDot(a, b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+function quatNegate(q) {
+    return { x: -q.x, y: -q.y, z: -q.z, w: -q.w };
+}
+
 // A drag/throw direction (dx, dy) rolls the dice about the axis
 // perpendicular to that direction, exactly like a ball or wheel rolling
 // across the screen plane in the direction it's pushed.
@@ -138,6 +146,38 @@ const FACE_QUAT = {
     5: quatFromAxisAngle(0, 1, 0, 90 * DEG2RAD),
     6: quatFromAxisAngle(0, 1, 0, 180 * DEG2RAD)
 };
+
+// Find which of the 6 faces is actually resting toward the camera, and the
+// exact flush orientation for it closest to the current tumble. A face can
+// come to rest at any of 4 in-plane twists (0/90/180/270 about the camera
+// axis) and still be "that face" - checking all 24 combinations and picking
+// the nearest one means the settle transition is always a small corrective
+// nudge into alignment, the way a real die settles, never a large snap to
+// an unrelated face.
+function nearestFaceOrientation(current) {
+    let bestFace = 1;
+    let bestQuat = FACE_QUAT[1];
+    let bestDot = -Infinity;
+
+    for (let face = 1; face <= 6; face++) {
+        for (let k = 0; k < 4; k++) {
+            const twist = quatFromAxisAngle(0, 0, 1, k * 90 * DEG2RAD);
+            let candidate = quatMul(twist, FACE_QUAT[face]);
+            let dot = quatDot(candidate, current);
+            if (dot < 0) {
+                candidate = quatNegate(candidate);
+                dot = -dot;
+            }
+            if (dot > bestDot) {
+                bestDot = dot;
+                bestFace = face;
+                bestQuat = candidate;
+            }
+        }
+    }
+
+    return { face: bestFace, quat: bestQuat };
+}
 
 // Initialize
 function init() {
@@ -518,8 +558,16 @@ function settleDice() {
         physicsRequestId = null;
     }
 
-    const roll = Math.floor(Math.random() * 6) + 1;
-    diceValue = roll;
+    // The result is read off the physics itself - whichever face the tumble
+    // actually left closest to the camera - rather than an independent
+    // random pick forced onto the dice after the fact. Forcing an unrelated
+    // random result meant the settle could require snapping to a totally
+    // different face than where the tumble stopped, which looked exactly
+    // like an unnatural "reroll" right at the end. Reading the real resting
+    // face means the correction is always just a small nudge into exact
+    // alignment, the way an actual die settles.
+    const { face, quat } = nearestFaceOrientation(orientation);
+    diceValue = face;
 
     // Re-enable smooth transition animations
     diceWrapper.style.transition = 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)';
@@ -534,8 +582,9 @@ function settleDice() {
     // The browser's native transform interpolation decomposes the matrix
     // and slerps its rotation component, so this transition glides from
     // wherever the tumble stopped straight to the exact flush orientation -
-    // one full face, never a corner or edge, facing the camera.
-    orientation = { ...FACE_QUAT[roll] };
+    // one full face, never a corner or edge, facing the camera - via the
+    // shortest possible path (quat sign already corrected above).
+    orientation = quat;
 
     renderTransforms();
     vibrate([10, 40, 15]);
