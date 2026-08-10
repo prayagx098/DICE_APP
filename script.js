@@ -10,63 +10,134 @@ const audioFallback = document.getElementById('dice-sound');
 let audioCtx = null;
 let audioBuffer = null;
 
+const DEG2RAD = Math.PI / 180;
+
+// ---------------------------------------------------------------------
+// Quaternion math. Orientation is tracked as an exact unit quaternion and
+// integrated with a closed-form axis-angle update every frame, instead of
+// accumulating independent X/Y/Z Euler angles (which only represents the
+// true rotation of a spinning rigid body when a single axis is active -
+// with two or more axes spinning at once, as happens on every real throw,
+// Euler accumulation drifts from the physically correct orientation more
+// with every frame). Quaternion composition is exact regardless of how
+// many axes are spinning simultaneously.
+// ---------------------------------------------------------------------
+function quatMul(a, b) {
+    return {
+        x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    };
+}
+
+function quatFromAxisAngle(ax, ay, az, angle) {
+    const half = angle / 2;
+    const s = Math.sin(half);
+    return { x: ax * s, y: ay * s, z: az * s, w: Math.cos(half) };
+}
+
+function quatNormalize(q) {
+    const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (len < 1e-9) return { x: 0, y: 0, z: 0, w: 1 };
+    return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len };
+}
+
+// Exact closed-form rotation for a constant angular velocity vector (rad
+// per frame) applied over one frame - no small-angle approximation error.
+function integrateOrientation(q, w) {
+    const angle = Math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
+    if (angle < 1e-9) return q;
+    const inv = 1 / angle;
+    const dq = quatFromAxisAngle(w.x * inv, w.y * inv, w.z * inv, angle);
+    return quatNormalize(quatMul(dq, q));
+}
+
+function quatToMatrix3d(q) {
+    const { x, y, z, w } = q;
+    const xx = x * x, yy = y * y, zz = z * z;
+    const xy = x * y, xz = x * z, yz = y * z;
+    const wx = w * x, wy = w * y, wz = w * z;
+
+    const m00 = 1 - 2 * (yy + zz), m10 = 2 * (xy + wz), m20 = 2 * (xz - wy);
+    const m01 = 2 * (xy - wz), m11 = 1 - 2 * (xx + zz), m21 = 2 * (yz + wx);
+    const m02 = 2 * (xz + wy), m12 = 2 * (yz - wx), m22 = 1 - 2 * (xx + yy);
+
+    return `matrix3d(${m00},${m10},${m20},0,${m01},${m11},${m21},0,${m02},${m12},${m22},0,0,0,0,1)`;
+}
+
+// A drag/throw direction (dx, dy) rolls the dice about the axis
+// perpendicular to that direction, exactly like a ball or wheel rolling
+// across the screen plane in the direction it's pushed.
+function rollAxisFromDelta(dx, dy) {
+    const mag = Math.sqrt(dx * dx + dy * dy);
+    if (mag < 1e-9) return { x: 0, y: 0, z: 0 };
+    return { x: -dy / mag, y: dx / mag, z: 0 };
+}
+
+// ---------------------------------------------------------------------
 // Gestures State
+// ---------------------------------------------------------------------
 let isDragging = false;
 let startX = 0;
 let startY = 0;
-let currentRotateX = 0;
-let currentRotateY = 0;
-let currentRotateZ = 0;
-let dragRotateX = 0;
-let dragRotateY = 0;
+let dragStartOrientation = { x: 0, y: 0, z: 0, w: 1 };
 let lastMoveTime = 0;
 let velocityX = 0;
 let velocityY = 0;
 let lastClientX = 0;
 let lastClientY = 0;
 
+// ---------------------------------------------------------------------
 // Physics Simulation State
+// ---------------------------------------------------------------------
 let isRolling = false;
 let diceValue = 1;
+let orientation = { x: 0, y: 0, z: 0, w: 1 }; // Current exact orientation
+let angVel = { x: 0, y: 0, z: 0 };            // Angular velocity, rad/frame
 let posX = 0;
 let posY = 0;
-let posZ = 0;   // Height above the table (bounce)
+let posZ = 0;   // Real depth toward the camera (bounce height)
 let velX = 0;
 let velY = 0;
 let velZ = 0;   // Vertical (bounce) velocity
-let spinX = 0;
-let spinY = 0;
-let spinZ = 0;
 let physicsRequestId = null;
 let hintDismissed = false;
 let fullscreenAttempted = false;
 
 const sensitivity = 0.4;
 const SWIPE_THRESHOLD = 30; // Min px to trigger swipe physics
+const DICE_SIZE = 176;
 
-// Real-world-ish bounce constants
-const GRAVITY = 1.15;              // Downward accel applied to velZ each frame
+// Real gravity/restitution constants - posZ/velZ are true px of depth, so
+// GRAVITY and impact behavior read directly as real motion, not a faked
+// scale trick.
+const GRAVITY = 1.0;               // px/frame^2 toward the table
 const BOUNCE_RESTITUTION = 0.5;    // Vertical velocity kept after hitting the table
-const IMPACT_FRICTION = 0.72;      // Spin/slide energy kept after each table impact
+const IMPACT_FRICTION = 0.72;      // Linear/angular energy kept after each table impact
 const AIR_DRAG = 0.999;            // Drag while airborne
 const GROUND_DRAG = 0.90;          // Drag while rolling on the table (real dice stop fast)
-const LIFT_PX_PER_UNIT = 1.4;      // Visual px of upward offset per posZ unit
-const SCALE_PER_UNIT = 0.0025;     // Perspective "closer to camera" scale per posZ unit
+const SETTLE_LINEAR = 0.15;
+const SETTLE_ANGULAR = 0.15 * DEG2RAD;
+const SETTLE_VELZ = 0.05;
 
-// Geometrically correct physical face rotations (Opposite sides sum to 7)
-// Face 1: Front (0, 0)
-// Face 2: Right (0, -90)
-// Face 3: Top (-90, 0)
-// Face 4: Bottom (90, 0)
-// Face 5: Left (0, 90)
-// Face 6: Back (0, -180)
-const faceRotations = {
-    1: { x: 0, y: 0 },
-    2: { x: 0, y: -90 },
-    3: { x: -90, y: 0 },
-    4: { x: 90, y: 0 },
-    5: { x: 0, y: 90 },
-    6: { x: 0, y: -180 }
+// Haptics: the Vibration API only exists on Chromium/Android - iOS Safari
+// has never implemented it, so this degrades silently there.
+const canVibrate = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
+function vibrate(pattern) {
+    if (canVibrate) navigator.vibrate(pattern);
+}
+
+// Exact target orientations for each face resting flush against the camera.
+// Each is a single-axis rotation, so it's built directly (Opposite faces
+// sum to 7).
+const FACE_QUAT = {
+    1: quatFromAxisAngle(0, 0, 0, 0),
+    2: quatFromAxisAngle(0, 1, 0, -90 * DEG2RAD),
+    3: quatFromAxisAngle(1, 0, 0, -90 * DEG2RAD),
+    4: quatFromAxisAngle(1, 0, 0, 90 * DEG2RAD),
+    5: quatFromAxisAngle(0, 1, 0, 90 * DEG2RAD),
+    6: quatFromAxisAngle(0, 1, 0, 180 * DEG2RAD)
 };
 
 // Initialize
@@ -201,8 +272,7 @@ function startDrag(e) {
     lastClientY = clientY;
     lastMoveTime = performance.now();
 
-    dragRotateX = currentRotateX;
-    dragRotateY = currentRotateY;
+    dragStartOrientation = { ...orientation };
 
     velocityX = 0;
     velocityY = 0;
@@ -227,12 +297,18 @@ function moveDrag(e) {
 
     const deltaX = clientX - startX;
     const deltaY = clientY - startY;
+    const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
-    // Map dragging offsets to 3D cube rotation angles
-    currentRotateY = dragRotateY + deltaX * sensitivity;
-    currentRotateX = dragRotateX - deltaY * sensitivity;
-
-    dice.style.transform = `rotateX(${currentRotateX}deg) rotateY(${currentRotateY}deg) rotateZ(${currentRotateZ}deg)`;
+    // Trackball-style rotation: roll about the single axis perpendicular to
+    // the drag vector, by an angle proportional to drag distance. This is
+    // an exact rotation for any drag direction (including diagonals),
+    // unlike separately blending independent X/Y Euler angles.
+    if (distance > 1e-6) {
+        const axis = rollAxisFromDelta(deltaX, deltaY);
+        const deltaQuat = quatFromAxisAngle(axis.x, axis.y, axis.z, distance * sensitivity * DEG2RAD);
+        orientation = quatNormalize(quatMul(deltaQuat, dragStartOrientation));
+        dice.style.transform = quatToMatrix3d(orientation);
+    }
 
     lastClientX = clientX;
     lastClientY = clientY;
@@ -263,12 +339,15 @@ function endDrag(e) {
             initialVelY = (initialVelY / speed) * maxSpeed;
         }
 
-        // Spin speeds proportional to swipe velocity
-        const swipeSpinX = -velocityY * 12;
-        const swipeSpinY = velocityX * 12;
-        const swipeSpinZ = (Math.random() - 0.5) * 6;
+        // Spin axis/speed proportional to swipe velocity - the dice rolls
+        // in the direction it was thrown, like an actual die.
+        const swipeAngVel = {
+            x: -velocityY * 12 * DEG2RAD,
+            y: velocityX * 12 * DEG2RAD,
+            z: (Math.random() - 0.5) * 6 * DEG2RAD
+        };
 
-        launchPhysicsDice(initialVelX, initialVelY, swipeSpinX, swipeSpinY, swipeSpinZ);
+        launchPhysicsDice(initialVelX, initialVelY, swipeAngVel);
     } else {
         if (distance < 10) {
             // Tap Roll: launch in random direction at high velocity
@@ -278,11 +357,13 @@ function endDrag(e) {
             const initialVelX = Math.cos(angle) * speed;
             const initialVelY = Math.sin(angle) * speed;
 
-            const swipeSpinX = (Math.random() - 0.5) * 36;
-            const swipeSpinY = (Math.random() - 0.5) * 36;
-            const swipeSpinZ = (Math.random() - 0.5) * 14;
+            const tapAngVel = {
+                x: (Math.random() - 0.5) * 36 * DEG2RAD,
+                y: (Math.random() - 0.5) * 36 * DEG2RAD,
+                z: (Math.random() - 0.5) * 14 * DEG2RAD
+            };
 
-            launchPhysicsDice(initialVelX, initialVelY, swipeSpinX, swipeSpinY, swipeSpinZ);
+            launchPhysicsDice(initialVelX, initialVelY, tapAngVel);
         } else {
             // Cancel roll: settle rotation flush on the current face, but
             // never move the dice from where it currently sits.
@@ -292,23 +373,22 @@ function endDrag(e) {
 }
 
 // Start the gravity-driven bounce/roll physics loop
-function launchPhysicsDice(initialVelX, initialVelY, initialSpinX, initialSpinY, initialSpinZ) {
+function launchPhysicsDice(initialVelX, initialVelY, initialAngVel) {
     if (isRolling) return;
     isRolling = true;
 
     velX = initialVelX;
     velY = initialVelY;
-    spinX = initialSpinX;
-    spinY = initialSpinY;
-    spinZ = initialSpinZ;
+    angVel = initialAngVel;
 
     // Throw force determines how high the dice hops off the table -
     // a harder swipe produces a bigger, longer-lived bounce.
     const throwSpeed = Math.sqrt(initialVelX * initialVelX + initialVelY * initialVelY);
-    velZ = 3 + Math.min(throwSpeed, 26) * 0.27;
+    velZ = 6 + Math.min(throwSpeed, 26) * 0.4;
     posZ = 0;
 
     playRollSound();
+    vibrate(14);
 
     // Disable css transitions for dynamic per-frame calculation
     diceWrapper.style.transition = 'none';
@@ -336,12 +416,14 @@ function updatePhysicsLoop() {
         if (Math.abs(velZ) > 0.8) {
             velZ = -velZ * BOUNCE_RESTITUTION;
             // Each table impact bleeds energy from the roll/spin too,
-            // producing real discrete bounces instead of a smooth slide.
+            // producing real discrete bounces instead of a smooth slide -
+            // plus a touch of chaos, since real dice never bounce perfectly
+            // predictably.
             velX *= IMPACT_FRICTION;
             velY *= IMPACT_FRICTION;
-            spinX *= IMPACT_FRICTION;
-            spinY *= IMPACT_FRICTION;
-            spinZ *= IMPACT_FRICTION;
+            angVel.x = angVel.x * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02;
+            angVel.y = angVel.y * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02;
+            angVel.z = angVel.z * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02;
             justImpacted = true;
         } else {
             velZ = 0;
@@ -349,28 +431,28 @@ function updatePhysicsLoop() {
     }
 
     if (justImpacted) {
-        playRollSound(Math.min(0.55, 0.18 + Math.abs(velZ) * 0.03), 1.05, 1.45);
+        const intensity = Math.min(1, Math.abs(velZ) / 12);
+        playRollSound(Math.min(0.55, 0.18 + intensity * 0.4), 1.05, 1.45);
+        vibrate(Math.round(6 + intensity * 18));
     }
 
     // --- Horizontal axes: drag is lighter while airborne, heavier once grounded ---
     const drag = posZ > 0 ? AIR_DRAG : GROUND_DRAG;
     velX *= drag;
     velY *= drag;
-    spinX *= drag;
-    spinY *= drag;
-    spinZ *= drag;
+    angVel.x *= drag;
+    angVel.y *= drag;
+    angVel.z *= drag;
 
     posX += velX;
     posY += velY;
-    currentRotateX += spinX;
-    currentRotateY += spinY;
-    currentRotateZ += spinZ;
+    orientation = integrateOrientation(orientation, angVel);
 
     // Viewport boundary collisions
     const width = window.innerWidth;
     const height = window.innerHeight;
-    const limitX = (width - 176) / 2;
-    const limitY = (height - 176) / 2;
+    const limitX = (width - DICE_SIZE) / 2;
+    const limitY = (height - DICE_SIZE) / 2;
 
     if (posX > limitX) {
         posX = limitX;
@@ -392,25 +474,24 @@ function updatePhysicsLoop() {
 
     // Check if the dice has come to rest on the table
     const linearSpeed = Math.sqrt(velX * velX + velY * velY);
-    const angularSpeed = Math.sqrt(spinX * spinX + spinY * spinY + spinZ * spinZ);
+    const angularSpeed = Math.sqrt(angVel.x * angVel.x + angVel.y * angVel.y + angVel.z * angVel.z);
 
-    if (posZ === 0 && linearSpeed < 0.15 && angularSpeed < 0.15 && Math.abs(velZ) < 0.05) {
+    if (posZ === 0 && linearSpeed < SETTLE_LINEAR && angularSpeed < SETTLE_ANGULAR && Math.abs(velZ) < SETTLE_VELZ) {
         settleDice();
     } else {
         physicsRequestId = requestAnimationFrame(updatePhysicsLoop);
     }
 }
 
-// Push the current physics state to the DOM
+// Push the current physics state to the DOM. posZ is real depth toward the
+// camera - the perspective on the .stage does the foreshortening/scale
+// math natively, rather than a hand-rolled approximation.
 function renderTransforms() {
-    const lift = posZ * LIFT_PX_PER_UNIT;
-    const scale = 1 + posZ * SCALE_PER_UNIT;
+    diceWrapper.style.transform = `translate3d(${posX}px, ${posY}px, ${posZ}px)`;
+    dice.style.transform = quatToMatrix3d(orientation);
 
-    diceWrapper.style.transform = `translate3d(${posX}px, ${posY - lift}px, 0) scale(${scale})`;
-    dice.style.transform = `rotateX(${currentRotateX}deg) rotateY(${currentRotateY}deg) rotateZ(${currentRotateZ}deg)`;
-
-    const shadowScale = Math.max(0.32, 1 - posZ * 0.014);
-    const shadowOpacity = Math.max(0.12, 1 - posZ * 0.022);
+    const shadowScale = Math.max(0.35, 1 - posZ * 0.006);
+    const shadowOpacity = Math.max(0.15, 1 - posZ * 0.009);
     diceShadow.style.transform = `translate3d(${posX}px, ${posY}px, 0) scale(${shadowScale})`;
     diceShadow.style.opacity = shadowOpacity;
 }
@@ -433,18 +514,16 @@ function settleDice() {
     // Rest flat on the table exactly where it landed
     posZ = 0;
     velZ = 0;
+    angVel = { x: 0, y: 0, z: 0 };
 
-    // Snap rotations to the nearest geometrically-correct flush orientation,
-    // so one full face - never a corner or edge - faces the camera.
-    const snapMultipleX = Math.round(currentRotateX / 360) * 360;
-    const snapMultipleY = Math.round(currentRotateY / 360) * 360;
-
-    const targetOffset = faceRotations[roll];
-    currentRotateX = snapMultipleX + targetOffset.x;
-    currentRotateY = snapMultipleY + targetOffset.y;
-    currentRotateZ = 0;
+    // The browser's native transform interpolation decomposes the matrix
+    // and slerps its rotation component, so this transition glides from
+    // wherever the tumble stopped straight to the exact flush orientation -
+    // one full face, never a corner or edge, facing the camera.
+    orientation = { ...FACE_QUAT[roll] };
 
     renderTransforms();
+    vibrate([10, 40, 15]);
 
     setTimeout(() => {
         isRolling = false;
@@ -455,15 +534,8 @@ function settleDice() {
 function snapToFace(faceVal) {
     dice.style.transition = 'transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)';
 
-    const snapMultipleX = Math.round(currentRotateX / 360) * 360;
-    const snapMultipleY = Math.round(currentRotateY / 360) * 360;
-
-    const targetOffset = faceRotations[faceVal];
-    currentRotateX = snapMultipleX + targetOffset.x;
-    currentRotateY = snapMultipleY + targetOffset.y;
-    currentRotateZ = 0;
-
-    dice.style.transform = `rotateX(${currentRotateX}deg) rotateY(${currentRotateY}deg) rotateZ(0deg)`;
+    orientation = { ...FACE_QUAT[faceVal] };
+    dice.style.transform = quatToMatrix3d(orientation);
 }
 
 // Run
