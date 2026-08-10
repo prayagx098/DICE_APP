@@ -411,19 +411,27 @@ function updatePhysicsLoop() {
     posZ += velZ;
 
     let justImpacted = false;
+    let impactIntensity = 0;
     if (posZ <= 0) {
         posZ = 0;
         if (Math.abs(velZ) > 0.8) {
+            // Scale the post-bounce chaos by how hard this particular impact
+            // was, using the incoming velocity (not the post-restitution
+            // one) - otherwise a nearly-spent final micro-bounce injects the
+            // same size of random kick as the first big one, and the dice
+            // never settles, just jitters in place indefinitely.
+            impactIntensity = Math.min(1, Math.abs(velZ) / 12);
             velZ = -velZ * BOUNCE_RESTITUTION;
+
             // Each table impact bleeds energy from the roll/spin too,
             // producing real discrete bounces instead of a smooth slide -
             // plus a touch of chaos, since real dice never bounce perfectly
             // predictably.
             velX *= IMPACT_FRICTION;
             velY *= IMPACT_FRICTION;
-            angVel.x = angVel.x * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02;
-            angVel.y = angVel.y * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02;
-            angVel.z = angVel.z * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02;
+            angVel.x = angVel.x * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02 * impactIntensity;
+            angVel.y = angVel.y * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02 * impactIntensity;
+            angVel.z = angVel.z * IMPACT_FRICTION + (Math.random() - 0.5) * 0.02 * impactIntensity;
             justImpacted = true;
         } else {
             velZ = 0;
@@ -431,9 +439,8 @@ function updatePhysicsLoop() {
     }
 
     if (justImpacted) {
-        const intensity = Math.min(1, Math.abs(velZ) / 12);
-        playRollSound(Math.min(0.55, 0.18 + intensity * 0.4), 1.05, 1.45);
-        vibrate(Math.round(6 + intensity * 18));
+        playRollSound(Math.min(0.55, 0.18 + impactIntensity * 0.4), 1.05, 1.45);
+        vibrate(Math.round(6 + impactIntensity * 18));
     }
 
     // --- Horizontal axes: drag is lighter while airborne, heavier once grounded ---
