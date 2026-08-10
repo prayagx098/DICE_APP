@@ -2,6 +2,8 @@
 const dragZone = document.getElementById('swipe-zone');
 const dice = document.getElementById('dice');
 const diceWrapper = document.getElementById('dice-wrapper');
+const diceShadow = document.getElementById('dice-shadow');
+const hint = document.getElementById('hint');
 const audioFallback = document.getElementById('dice-sound');
 
 // Web Audio API State
@@ -28,15 +30,28 @@ let isRolling = false;
 let diceValue = 1;
 let posX = 0;
 let posY = 0;
+let posZ = 0;   // Height above the table (bounce)
 let velX = 0;
 let velY = 0;
+let velZ = 0;   // Vertical (bounce) velocity
 let spinX = 0;
 let spinY = 0;
 let spinZ = 0;
 let physicsRequestId = null;
+let hintDismissed = false;
+let fullscreenAttempted = false;
 
 const sensitivity = 0.4;
 const SWIPE_THRESHOLD = 30; // Min px to trigger swipe physics
+
+// Real-world-ish bounce constants
+const GRAVITY = 1.15;              // Downward accel applied to velZ each frame
+const BOUNCE_RESTITUTION = 0.5;    // Vertical velocity kept after hitting the table
+const IMPACT_FRICTION = 0.72;      // Spin/slide energy kept after each table impact
+const AIR_DRAG = 0.999;            // Drag while airborne
+const GROUND_DRAG = 0.90;          // Drag while rolling on the table (real dice stop fast)
+const LIFT_PX_PER_UNIT = 1.4;      // Visual px of upward offset per posZ unit
+const SCALE_PER_UNIT = 0.0025;     // Perspective "closer to camera" scale per posZ unit
 
 // Geometrically correct physical face rotations (Opposite sides sum to 7)
 // Face 1: Front (0, 0)
@@ -59,6 +74,7 @@ function init() {
     setupDiceFaces();
     initAudioEngine();
     setupEventListeners();
+    renderTransforms();
 }
 
 // Generate premium ivory pips on face nodes
@@ -79,10 +95,10 @@ function setupDiceFaces() {
     for (let i = 1; i <= 6; i++) {
         const face = document.createElement('div');
         face.classList.add('face', `face${i}`);
-        
+
         const grid = document.createElement('div');
         grid.classList.add('pip-grid');
-        
+
         const pips = pipConfigs[i];
         pips.forEach(pos => {
             const pip = document.createElement('span');
@@ -100,7 +116,7 @@ async function initAudioEngine() {
     try {
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
         audioCtx = new AudioContext();
-        
+
         const response = await fetch('dice.mp3');
         const arrayBuffer = await response.arrayBuffer();
         audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
@@ -109,24 +125,44 @@ async function initAudioEngine() {
     }
 }
 
-// Play low-latency sound with randomized pitch shifts
-function playRollSound() {
+// Play low-latency sound with randomized pitch shifts and volume
+function playRollSound(volume = 1, rateMin = 0.86, rateMax = 1.14) {
     if (audioCtx && audioBuffer) {
         if (audioCtx.state === 'suspended') {
             audioCtx.resume();
         }
         const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
-        
-        // Randomize pitch multiplier (0.86 to 1.14) for realistic roll variants
-        source.playbackRate.value = 0.86 + Math.random() * 0.28;
-        
-        source.connect(audioCtx.destination);
+        source.playbackRate.value = rateMin + Math.random() * (rateMax - rateMin);
+
+        const gain = audioCtx.createGain();
+        gain.gain.value = volume;
+
+        source.connect(gain).connect(audioCtx.destination);
         source.start(0);
-    } else {
+    } else if (volume >= 1) {
         audioFallback.currentTime = 0;
-        audioFallback.play().catch(e => {});
+        audioFallback.play().catch(() => {});
     }
+}
+
+// Request true fullscreen on the very first gesture (browsers require user activation)
+function tryEnterFullscreen() {
+    if (fullscreenAttempted) return;
+    fullscreenAttempted = true;
+
+    const el = document.documentElement;
+    const request = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+
+    if (request && !document.fullscreenElement) {
+        request.call(el).catch(() => {});
+    }
+}
+
+function dismissHint() {
+    if (hintDismissed) return;
+    hintDismissed = true;
+    hint.classList.add('hidden');
 }
 
 // Global Viewport Drag and Swipe events
@@ -144,14 +180,17 @@ function setupEventListeners() {
 
 function startDrag(e) {
     if (isRolling) return;
-    
+
     e.preventDefault();
+    tryEnterFullscreen();
+    dismissHint();
 
     isDragging = true;
-    
+
     // Stop any active settle transitions
     diceWrapper.style.transition = 'none';
     dice.style.transition = 'none';
+    diceShadow.style.transition = 'none';
 
     const clientX = e.type === 'touchstart' ? e.touches[0].clientX : e.clientX;
     const clientY = e.type === 'touchstart' ? e.touches[0].clientY : e.clientY;
@@ -161,16 +200,14 @@ function startDrag(e) {
     lastClientX = clientX;
     lastClientY = clientY;
     lastMoveTime = performance.now();
-    
+
     dragRotateX = currentRotateX;
     dragRotateY = currentRotateY;
 
     velocityX = 0;
     velocityY = 0;
-    
-    posX = 0;
-    posY = 0;
-    diceWrapper.style.transform = 'translate3d(0px, 0px, 0)';
+    // Position (posX/posY) is intentionally left untouched: the dice stays
+    // exactly where its last roll settled, rather than jumping to center.
 }
 
 function moveDrag(e) {
@@ -178,7 +215,7 @@ function moveDrag(e) {
 
     const clientX = e.type === 'touchmove' ? e.touches[0].clientX : e.clientX;
     const clientY = e.type === 'touchmove' ? e.touches[0].clientY : e.clientY;
-    
+
     const now = performance.now();
     const dt = now - lastMoveTime;
 
@@ -217,10 +254,10 @@ function endDrag(e) {
         // Swipe Roll: calculate initial physics translation velocities
         let initialVelX = velocityX * 16;
         let initialVelY = velocityY * 16;
-        
+
         // Limit velocity to prevent chaotic out-of-bounds speed
         const speed = Math.sqrt(initialVelX * initialVelX + initialVelY * initialVelY);
-        const maxSpeed = 24;
+        const maxSpeed = 26;
         if (speed > maxSpeed) {
             initialVelX = (initialVelX / speed) * maxSpeed;
             initialVelY = (initialVelY / speed) * maxSpeed;
@@ -237,49 +274,51 @@ function endDrag(e) {
             // Tap Roll: launch in random direction at high velocity
             const angle = Math.random() * Math.PI * 2;
             const speed = 14 + Math.random() * 8;
-            
+
             const initialVelX = Math.cos(angle) * speed;
             const initialVelY = Math.sin(angle) * speed;
-            
+
             const swipeSpinX = (Math.random() - 0.5) * 36;
             const swipeSpinY = (Math.random() - 0.5) * 36;
             const swipeSpinZ = (Math.random() - 0.5) * 14;
 
             launchPhysicsDice(initialVelX, initialVelY, swipeSpinX, swipeSpinY, swipeSpinZ);
         } else {
-            // Cancel roll: snap back smoothly
+            // Cancel roll: settle rotation flush on the current face, but
+            // never move the dice from where it currently sits.
             snapToFace(diceValue);
         }
     }
 }
 
-// Start Bouncing physics loop
+// Start the gravity-driven bounce/roll physics loop
 function launchPhysicsDice(initialVelX, initialVelY, initialSpinX, initialSpinY, initialSpinZ) {
     if (isRolling) return;
     isRolling = true;
 
-    // Reset loop variables
-    posX = 0;
-    posY = 0;
     velX = initialVelX;
     velY = initialVelY;
     spinX = initialSpinX;
     spinY = initialSpinY;
     spinZ = initialSpinZ;
 
+    // Throw force determines how high the dice hops off the table -
+    // a harder swipe produces a bigger, longer-lived bounce.
+    const throwSpeed = Math.sqrt(initialVelX * initialVelX + initialVelY * initialVelY);
+    velZ = 3 + Math.min(throwSpeed, 26) * 0.27;
+    posZ = 0;
+
     playRollSound();
 
-    // Disable css transitions for dynamic calculation
+    // Disable css transitions for dynamic per-frame calculation
     diceWrapper.style.transition = 'none';
     dice.style.transition = 'none';
-    
-    // Add visual container shake during bounces
-    document.querySelector('.diceContainer').classList.add('shaking');
+    diceShadow.style.transition = 'none';
 
     if (physicsRequestId) {
         cancelAnimationFrame(physicsRequestId);
     }
-    
+
     physicsRequestId = requestAnimationFrame(updatePhysicsLoop);
 }
 
@@ -287,12 +326,39 @@ function launchPhysicsDice(initialVelX, initialVelY, initialSpinX, initialSpinY,
 function updatePhysicsLoop() {
     if (!isRolling) return;
 
-    // Apply deceleration friction (decay multiplier per frame)
-    velX *= 0.982;
-    velY *= 0.982;
-    spinX *= 0.982;
-    spinY *= 0.982;
-    spinZ *= 0.982;
+    // --- Vertical (bounce) axis: real gravity + restitution ---
+    velZ -= GRAVITY;
+    posZ += velZ;
+
+    let justImpacted = false;
+    if (posZ <= 0) {
+        posZ = 0;
+        if (Math.abs(velZ) > 0.8) {
+            velZ = -velZ * BOUNCE_RESTITUTION;
+            // Each table impact bleeds energy from the roll/spin too,
+            // producing real discrete bounces instead of a smooth slide.
+            velX *= IMPACT_FRICTION;
+            velY *= IMPACT_FRICTION;
+            spinX *= IMPACT_FRICTION;
+            spinY *= IMPACT_FRICTION;
+            spinZ *= IMPACT_FRICTION;
+            justImpacted = true;
+        } else {
+            velZ = 0;
+        }
+    }
+
+    if (justImpacted) {
+        playRollSound(Math.min(0.55, 0.18 + Math.abs(velZ) * 0.03), 1.05, 1.45);
+    }
+
+    // --- Horizontal axes: drag is lighter while airborne, heavier once grounded ---
+    const drag = posZ > 0 ? AIR_DRAG : GROUND_DRAG;
+    velX *= drag;
+    velY *= drag;
+    spinX *= drag;
+    spinY *= drag;
+    spinZ *= drag;
 
     posX += velX;
     posY += velY;
@@ -300,72 +366,76 @@ function updatePhysicsLoop() {
     currentRotateY += spinY;
     currentRotateZ += spinZ;
 
-    // Viewport Boundary collisions
+    // Viewport boundary collisions
     const width = window.innerWidth;
     const height = window.innerHeight;
-    const limitX = (width - 160) / 2;
-    const limitY = (height - 160) / 2;
+    const limitX = (width - 176) / 2;
+    const limitY = (height - 176) / 2;
 
-    let wallImpact = false;
-
-    // Left/Right walls
     if (posX > limitX) {
         posX = limitX;
-        velX = -velX * 0.76; // Reverse direction with 24% bounce energy loss
-        wallImpact = true;
+        velX = -velX * 0.76;
     } else if (posX < -limitX) {
         posX = -limitX;
         velX = -velX * 0.76;
-        wallImpact = true;
     }
 
-    // Top/Bottom walls
     if (posY > limitY) {
         posY = limitY;
         velY = -velY * 0.76;
-        wallImpact = true;
     } else if (posY < -limitY) {
         posY = -limitY;
         velY = -velY * 0.76;
-        wallImpact = true;
     }
 
-    // Apply translation to wrapper & 3D rotation to the inner cube
-    diceWrapper.style.transform = `translate3d(${posX}px, ${posY}px, 0)`;
-    dice.style.transform = `rotateX(${currentRotateX}deg) rotateY(${currentRotateY}deg) rotateZ(${currentRotateZ}deg)`;
+    renderTransforms();
 
-    // Check if the dice has slowed down enough to settle
+    // Check if the dice has come to rest on the table
     const linearSpeed = Math.sqrt(velX * velX + velY * velY);
     const angularSpeed = Math.sqrt(spinX * spinX + spinY * spinY + spinZ * spinZ);
 
-    if (linearSpeed < 0.22 && angularSpeed < 0.22) {
+    if (posZ === 0 && linearSpeed < 0.15 && angularSpeed < 0.15 && Math.abs(velZ) < 0.05) {
         settleDice();
     } else {
         physicsRequestId = requestAnimationFrame(updatePhysicsLoop);
     }
 }
 
-// Settle roll, snap flat and return to center
+// Push the current physics state to the DOM
+function renderTransforms() {
+    const lift = posZ * LIFT_PX_PER_UNIT;
+    const scale = 1 + posZ * SCALE_PER_UNIT;
+
+    diceWrapper.style.transform = `translate3d(${posX}px, ${posY - lift}px, 0) scale(${scale})`;
+    dice.style.transform = `rotateX(${currentRotateX}deg) rotateY(${currentRotateY}deg) rotateZ(${currentRotateZ}deg)`;
+
+    const shadowScale = Math.max(0.32, 1 - posZ * 0.014);
+    const shadowOpacity = Math.max(0.12, 1 - posZ * 0.022);
+    diceShadow.style.transform = `translate3d(${posX}px, ${posY}px, 0) scale(${shadowScale})`;
+    diceShadow.style.opacity = shadowOpacity;
+}
+
+// Settle roll: resolve to a flush, corner-free face - in place, no re-centering
 function settleDice() {
     if (physicsRequestId) {
         cancelAnimationFrame(physicsRequestId);
         physicsRequestId = null;
     }
 
-    // Settle target random result
     const roll = Math.floor(Math.random() * 6) + 1;
     diceValue = roll;
 
     // Re-enable smooth transition animations
-    diceWrapper.style.transition = 'transform 0.6s cubic-bezier(0.25, 1, 0.5, 1)';
-    dice.style.transition = 'transform 0.6s cubic-bezier(0.25, 1, 0.5, 1)';
+    diceWrapper.style.transition = 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)';
+    dice.style.transition = 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1)';
+    diceShadow.style.transition = 'transform 0.5s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.5s ease';
 
-    // 1. Pull the translated wrapper back to the viewport center (0, 0)
-    posX = 0;
-    posY = 0;
-    diceWrapper.style.transform = 'translate3d(0px, 0px, 0)';
+    // Rest flat on the table exactly where it landed
+    posZ = 0;
+    velZ = 0;
 
-    // 2. Snap rotations flat matching geometrically correct angles
+    // Snap rotations to the nearest geometrically-correct flush orientation,
+    // so one full face - never a corner or edge - faces the camera.
     const snapMultipleX = Math.round(currentRotateX / 360) * 360;
     const snapMultipleY = Math.round(currentRotateY / 360) * 360;
 
@@ -374,26 +444,20 @@ function settleDice() {
     currentRotateY = snapMultipleY + targetOffset.y;
     currentRotateZ = 0;
 
-    dice.style.transform = `rotateX(${currentRotateX}deg) rotateY(${currentRotateY}deg) rotateZ(0deg)`;
+    renderTransforms();
 
     setTimeout(() => {
-        document.querySelector('.diceContainer').classList.remove('shaking');
         isRolling = false;
-    }, 600);
+    }, 500);
 }
 
-// Snap back to face when swipe cancels
+// Cancel a small drag: settle rotation flush without moving the dice at all
 function snapToFace(faceVal) {
-    diceWrapper.style.transition = 'transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)';
     dice.style.transition = 'transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)';
-
-    posX = 0;
-    posY = 0;
-    diceWrapper.style.transform = 'translate3d(0px, 0px, 0)';
 
     const snapMultipleX = Math.round(currentRotateX / 360) * 360;
     const snapMultipleY = Math.round(currentRotateY / 360) * 360;
-    
+
     const targetOffset = faceRotations[faceVal];
     currentRotateX = snapMultipleX + targetOffset.x;
     currentRotateY = snapMultipleY + targetOffset.y;
