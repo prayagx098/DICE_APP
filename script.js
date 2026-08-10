@@ -66,14 +66,6 @@ function quatToMatrix3d(q) {
     return `matrix3d(${m00},${m10},${m20},0,${m01},${m11},${m21},0,${m02},${m12},${m22},0,0,0,0,1)`;
 }
 
-function quatDot(a, b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-}
-
-function quatNegate(q) {
-    return { x: -q.x, y: -q.y, z: -q.z, w: -q.w };
-}
-
 // A drag/throw direction (dx, dy) rolls the dice about the axis
 // perpendicular to that direction, exactly like a ball or wheel rolling
 // across the screen plane in the direction it's pushed.
@@ -135,48 +127,78 @@ function vibrate(pattern) {
     if (canVibrate) navigator.vibrate(pattern);
 }
 
-// Exact target orientations for each face resting flush against the camera.
-// Each is a single-axis rotation, so it's built directly (Opposite faces
-// sum to 7).
-const FACE_QUAT = {
-    1: quatFromAxisAngle(0, 0, 0, 0),
-    2: quatFromAxisAngle(0, 1, 0, -90 * DEG2RAD),
-    3: quatFromAxisAngle(1, 0, 0, -90 * DEG2RAD),
-    4: quatFromAxisAngle(1, 0, 0, 90 * DEG2RAD),
-    5: quatFromAxisAngle(0, 1, 0, 90 * DEG2RAD),
-    6: quatFromAxisAngle(0, 1, 0, 180 * DEG2RAD)
+// Outward normal of each face in the cube's own rest/local frame (Opposite
+// faces sum to 7). Used to figure out which face is pointing toward the
+// camera at any given orientation, and to compute the minimal correction
+// needed to bring it flush.
+const FACE_NORMAL = {
+    1: { x: 0, y: 0, z: 1 },
+    2: { x: 1, y: 0, z: 0 },
+    3: { x: 0, y: -1, z: 0 },
+    4: { x: 0, y: 1, z: 0 },
+    5: { x: -1, y: 0, z: 0 },
+    6: { x: 0, y: 0, z: -1 }
 };
 
-// Find which of the 6 faces is actually resting toward the camera, and the
-// exact flush orientation for it closest to the current tumble. A face can
-// come to rest at any of 4 in-plane twists (0/90/180/270 about the camera
-// axis) and still be "that face" - checking all 24 combinations and picking
-// the nearest one means the settle transition is always a small corrective
-// nudge into alignment, the way a real die settles, never a large snap to
-// an unrelated face.
-function nearestFaceOrientation(current) {
+function cross(a, b) {
+    return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+
+function rotateVectorByQuat(q, v) {
+    const uv = cross(q, v);
+    const uuv = cross(q, uv);
+    return {
+        x: v.x + 2 * (q.w * uv.x + uuv.x),
+        y: v.y + 2 * (q.w * uv.y + uuv.y),
+        z: v.z + 2 * (q.w * uv.z + uuv.z)
+    };
+}
+
+// Rotate `current` by the minimal ("swing only") rotation that brings the
+// given face's normal exactly flush to the camera (+Z) - with no forced
+// twist in the camera-facing plane. A real die can come to rest with its
+// pips at any angle of in-plane rotation; only which face is up is
+// determined by gravity. Snapping the twist to a canonical 0/90/180/270
+// alignment (as an earlier version did) is an artificial correction the
+// physics never asked for, and reads as an unnatural little auto-align pop
+// right at the end. This only ever corrects the tilt needed to flatten the
+// face against the camera, so it preserves whatever twist the tumble
+// actually left it at.
+function swingToFace(current, face) {
+    const worldNormal = rotateVectorByQuat(current, FACE_NORMAL[face]);
+    const target = { x: 0, y: 0, z: 1 };
+
+    const axis = cross(worldNormal, target);
+    const axisLen = Math.sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+    const dot = Math.max(-1, Math.min(1, worldNormal.x * target.x + worldNormal.y * target.y + worldNormal.z * target.z));
+    const angle = Math.acos(dot);
+
+    let swing;
+    if (axisLen < 1e-6) {
+        // Already flush, or exactly the opposite face - pick any
+        // perpendicular axis for the 180 degree flip case.
+        swing = angle > Math.PI / 2 ? quatFromAxisAngle(1, 0, 0, Math.PI) : { x: 0, y: 0, z: 0, w: 1 };
+    } else {
+        swing = quatFromAxisAngle(axis.x / axisLen, axis.y / axisLen, axis.z / axisLen, angle);
+    }
+
+    return quatNormalize(quatMul(swing, current));
+}
+
+// Find which of the 6 faces is actually resting toward the camera.
+function restingFace(current) {
     let bestFace = 1;
-    let bestQuat = FACE_QUAT[1];
     let bestDot = -Infinity;
 
     for (let face = 1; face <= 6; face++) {
-        for (let k = 0; k < 4; k++) {
-            const twist = quatFromAxisAngle(0, 0, 1, k * 90 * DEG2RAD);
-            let candidate = quatMul(twist, FACE_QUAT[face]);
-            let dot = quatDot(candidate, current);
-            if (dot < 0) {
-                candidate = quatNegate(candidate);
-                dot = -dot;
-            }
-            if (dot > bestDot) {
-                bestDot = dot;
-                bestFace = face;
-                bestQuat = candidate;
-            }
+        const worldNormal = rotateVectorByQuat(current, FACE_NORMAL[face]);
+        if (worldNormal.z > bestDot) {
+            bestDot = worldNormal.z;
+            bestFace = face;
         }
     }
 
-    return { face: bestFace, quat: bestQuat };
+    return bestFace;
 }
 
 // Initialize
@@ -560,13 +582,8 @@ function settleDice() {
 
     // The result is read off the physics itself - whichever face the tumble
     // actually left closest to the camera - rather than an independent
-    // random pick forced onto the dice after the fact. Forcing an unrelated
-    // random result meant the settle could require snapping to a totally
-    // different face than where the tumble stopped, which looked exactly
-    // like an unnatural "reroll" right at the end. Reading the real resting
-    // face means the correction is always just a small nudge into exact
-    // alignment, the way an actual die settles.
-    const { face, quat } = nearestFaceOrientation(orientation);
+    // random pick forced onto the dice after the fact.
+    const face = restingFace(orientation);
     diceValue = face;
 
     // Re-enable smooth transition animations
@@ -579,12 +596,12 @@ function settleDice() {
     velZ = 0;
     angVel = { x: 0, y: 0, z: 0 };
 
-    // The browser's native transform interpolation decomposes the matrix
-    // and slerps its rotation component, so this transition glides from
-    // wherever the tumble stopped straight to the exact flush orientation -
-    // one full face, never a corner or edge, facing the camera - via the
-    // shortest possible path (quat sign already corrected above).
-    orientation = quat;
+    // Only correct the tilt needed to flatten that face against the camera -
+    // never the in-plane twist. A real die can rest with its pips at any
+    // rotation; forcing them to a canonical upright angle was an artificial
+    // correction the physics never asked for, and read as an unnatural
+    // auto-align pop right at the end.
+    orientation = swingToFace(orientation, face);
 
     renderTransforms();
     vibrate([10, 40, 15]);
@@ -598,7 +615,7 @@ function settleDice() {
 function snapToFace(faceVal) {
     dice.style.transition = 'transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)';
 
-    orientation = { ...FACE_QUAT[faceVal] };
+    orientation = swingToFace(orientation, faceVal);
     dice.style.transform = quatToMatrix3d(orientation);
 }
 
