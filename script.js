@@ -103,7 +103,6 @@ let velY = 0;
 let velZ = 0;   // Vertical (bounce) velocity
 let physicsRequestId = null;
 let hintDismissed = false;
-let fullscreenAttempted = false;
 
 const sensitivity = 0.4;
 const SWIPE_THRESHOLD = 30; // Min px to trigger swipe physics
@@ -217,16 +216,22 @@ function playRollSound(volume = 1, rateMin = 0.86, rateMax = 1.14) {
     }
 }
 
-// Request true fullscreen on the very first gesture (browsers require user activation)
+// Request true fullscreen on a user gesture (browsers require user activation).
+// This is retried on every gesture rather than just once: on Android, the
+// very first touchstart of a session frequently gets its fullscreen request
+// silently rejected (transient activation isn't reliably granted that
+// early), and if that one shot were the only attempt, the app would be
+// stuck fullscreen-less for the rest of the session.
 function tryEnterFullscreen() {
-    if (fullscreenAttempted) return;
-    fullscreenAttempted = true;
+    if (document.fullscreenElement) return;
 
     const el = document.documentElement;
-    const request = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    const request = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if (!request) return;
 
-    if (request && !document.fullscreenElement) {
-        request.call(el).catch(() => {});
+    const result = request.call(el, { navigationUI: 'hide' });
+    if (result && typeof result.catch === 'function') {
+        result.catch(err => console.warn('Fullscreen request failed, will retry on next gesture:', err));
     }
 }
 
@@ -318,6 +323,9 @@ function moveDrag(e) {
 function endDrag(e) {
     if (!isDragging) return;
     isDragging = false;
+    // Some Android builds only grant fullscreen activation on the completed
+    // tap rather than the initial touchstart - retry here as a second chance.
+    tryEnterFullscreen();
 
     const clientX = e.type === 'touchend' ? e.changedTouches[0].clientX : e.clientX;
     const clientY = e.type === 'touchend' ? e.changedTouches[0].clientY : e.clientY;
